@@ -4,7 +4,6 @@ pragma solidity ^0.8.9;
 contract Donation {
     
     // Donation Campaigns run by various Organizations
-    // This Struct below holds all the necessary information of a Donation Campaign
     struct Campaign {
         address owner;
         string title;
@@ -15,13 +14,13 @@ contract Donation {
         string image;
         address[] donators;
         uint256[] donations;
+        uint256[] milestones;  // Store milestone percentages
+        uint256[] milestoneAmounts;  // Store amounts to release at each milestone
+        bool[] milestoneReached;  // Track whether milestones are reached
     }
 
-    // Mapping that stores all the campaigns
     mapping(uint256 => Campaign) public campaigns;
     uint256 public numberOfCampaigns = 0;
-
-    // List of all the functions needed for our donations platform
 
     // Function to create a new donation campaign
     function createCampaign(
@@ -30,18 +29,18 @@ contract Donation {
         string memory _description,
         uint256 _target, 
         uint256 _deadline, 
-        string memory _image
+        string memory _image,
+        uint256[] memory _milestones // Pass milestones as an array of percentages
     ) 
         public 
         returns (uint256) 
     {
-        // Access the campaign at the current index and create a reference
+        require(_milestones.length > 0, "At least one milestone must be set.");
+
         Campaign storage campaign = campaigns[numberOfCampaigns];
 
-        // Ensure the deadline is in the future
         require(_deadline > block.timestamp, "Deadline should be in the future.");
 
-        // Assign values to the campaign
         campaign.owner = _owner;
         campaign.title = _title;
         campaign.description = _description;
@@ -49,29 +48,54 @@ contract Donation {
         campaign.deadline = _deadline;
         campaign.image = _image;
 
-        // Increment the number of campaigns
+        // Initialize milestones
+        for (uint i = 0; i < _milestones.length; i++) {
+            campaign.milestones.push(_milestones[i]);
+            campaign.milestoneAmounts.push((_target * _milestones[i]) / 100); // Calculate milestone amounts
+            campaign.milestoneReached.push(false); // Initially, all milestones are not reached
+        }
+
         numberOfCampaigns++;
 
-        // Return the index of the newly created campaign
         return numberOfCampaigns - 1;
     }
 
     // Function to donate to a specific campaign by ID
     function donateToCampaign(uint256 _id) public payable {
-        uint256 amount = msg.value;  // The amount sent by the sender
+        uint256 amount = msg.value;
         Campaign storage campaign = campaigns[_id];
 
-        // Add the sender's address and donation amount to the campaign
         campaign.donators.push(msg.sender);
         campaign.donations.push(amount);
 
-        // Transfer the donation to the campaign owner
         (bool sent, ) = payable(campaign.owner).call{value: amount}("");
-
-        // If successful, update the total amount collected
+        
         if (sent) {
             campaign.amountCollected += amount;
+            checkMilestones(_id);  // Check if any milestones are reached after donation
         }
+    }
+
+    // Function to check and mark milestones as reached
+    function checkMilestones(uint256 _id) internal {
+        Campaign storage campaign = campaigns[_id];
+        
+        for (uint i = 0; i < campaign.milestones.length; i++) {
+            if (!campaign.milestoneReached[i]) {
+                if (campaign.amountCollected >= campaign.milestoneAmounts[i]) {
+                    campaign.milestoneReached[i] = true;  // Mark milestone as reached
+                    releaseFunds(_id, campaign.milestoneAmounts[i]);  // Release funds if milestone reached
+                }
+            }
+        }
+    }
+
+    // Function to release funds to the owner when milestones are reached
+    function releaseFunds(uint256 _id, uint256 _amount) internal {
+        Campaign storage campaign = campaigns[_id];
+        
+        (bool sent, ) = payable(campaign.owner).call{value: _amount}("");
+        require(sent, "Failed to send Ether");
     }
 
     // Function to get the list of donators and their donations for a specific campaign
@@ -80,7 +104,6 @@ contract Donation {
         view 
         returns (address[] memory, uint256[] memory) 
     {
-        // Return the list of donators and donations for the campaign
         return (campaigns[_id].donators, campaigns[_id].donations);
     }
 
@@ -90,16 +113,11 @@ contract Donation {
         view 
         returns (Campaign[] memory) 
     {
-        // Create an array to hold all campaigns
         Campaign[] memory allCampaigns = new Campaign[](numberOfCampaigns);
-
-        // Loop through all campaigns and add them to the array
         for (uint i = 0; i < numberOfCampaigns; i++) {
             Campaign storage item = campaigns[i];
             allCampaigns[i] = item;
         }
-
-        // Return the array of campaigns
         return allCampaigns;
     }
 }
