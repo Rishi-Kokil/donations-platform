@@ -1,123 +1,126 @@
-// SPDX-License-Identifier: UNLICENSED
+// SPDX-License-Identifier: Apache-1.1
 pragma solidity ^0.8.9;
 
+import "./MultiSigWallet.sol";
+import "./ProfileManager.sol";
+
 contract Donation {
-    
-    // Donation Campaigns run by various Organizations
     struct Campaign {
         address owner;
         string title;
         string description;
         uint256 target;
-        uint256 deadline;
         uint256 amountCollected;
-        string image;
+        uint256 totalWithdrawn;
+        string[] fundUtilization;
         address[] donators;
-        uint256[] donations;
-        uint256[] milestones;  // Store milestone percentages
-        uint256[] milestoneAmounts;  // Store amounts to release at each milestone
-        bool[] milestoneReached;  // Track whether milestones are reached
+        MultiSigWallet multiSigWallet; // Separate MultiSig wallet for each campaign
     }
 
+    ProfileManager public profileManager; // Reference to ProfileManager contract
+
     mapping(uint256 => Campaign) public campaigns;
-    uint256 public numberOfCampaigns = 0;
+    mapping(uint256 => mapping(address => uint256)) public donations; // Mapping of campaign ID to donator address to amount
+    mapping(uint256 => bool) public campaignExists;
 
-    // Function to create a new donation campaign
+    uint256 public campaignCount = 0;
+
+    constructor(address _profileManagerAddress) {
+        profileManager = ProfileManager(_profileManagerAddress); // Initialize ProfileManager contract
+    }
+
+    // Function to create a campaign associated with a user's profile
     function createCampaign(
-        address _owner, 
-        string memory _title, 
+        string memory _title,
         string memory _description,
-        uint256 _target, 
-        uint256 _deadline, 
-        string memory _image,
-        uint256[] memory _milestones // Pass milestones as an array of percentages
-    ) 
-        public 
-        returns (uint256) 
-    {
-        require(_milestones.length > 0, "At least one milestone must be set.");
+        uint256 _target,
+        address[] memory _signers,
+        uint256 _requiredApprovals
+    ) public {
+        require(profileManager.isProfileOwner(msg.sender), "Not the profile owner");
+        require(_signers.length > 0, "At least one signer required");
+        require(_requiredApprovals > 0 && _requiredApprovals <= _signers.length, "Invalid number of approvals");
 
-        Campaign storage campaign = campaigns[numberOfCampaigns];
+        campaignCount++;
+        Campaign storage campaign = campaigns[campaignCount];
 
-        require(_deadline > block.timestamp, "Deadline should be in the future.");
-
-        campaign.owner = _owner;
         campaign.title = _title;
         campaign.description = _description;
         campaign.target = _target;
-        campaign.deadline = _deadline;
-        campaign.image = _image;
+        campaign.amountCollected = 0;
+        campaign.totalWithdrawn = 0;
+        campaign.owner = msg.sender;
 
-        // Initialize milestones
-        for (uint i = 0; i < _milestones.length; i++) {
-            campaign.milestones.push(_milestones[i]);
-            campaign.milestoneAmounts.push((_target * _milestones[i]) / 100); // Calculate milestone amounts
-            campaign.milestoneReached.push(false); // Initially, all milestones are not reached
-        }
+        // Create a new MultiSig wallet for this campaign
+        campaign.multiSigWallet = new MultiSigWallet(_signers, _requiredApprovals);
 
-        numberOfCampaigns++;
-
-        return numberOfCampaigns - 1;
+        campaignExists[campaignCount] = true;
     }
 
-    // Function to donate to a specific campaign by ID
-    function donateToCampaign(uint256 _id) public payable {
-        uint256 amount = msg.value;
-        Campaign storage campaign = campaigns[_id];
+    // Function to donate to a campaign linked with a profile
+    function donate(uint256 _campaignId) public payable {
+        require(campaignExists[_campaignId], "Campaign does not exist");
+        require(profileManager.isProfileActive(msg.sender), "Profile is not active");
+        require(msg.value > 0, "Donation must be greater than 0");
 
-        campaign.donators.push(msg.sender);
-        campaign.donations.push(amount);
+        donations[_campaignId][msg.sender] += msg.value;
+        campaigns[_campaignId].amountCollected += msg.value;
+        campaigns[_campaignId].donators.push(msg.sender);
 
-        (bool sent, ) = payable(campaign.owner).call{value: amount}("");
-        
-        if (sent) {
-            campaign.amountCollected += amount;
-            checkMilestones(_id);  // Check if any milestones are reached after donation
-        }
+        // Funds are deposited to this contract, not sent directly to the multi-sig wallet
     }
 
-    // Function to check and mark milestones as reached
-    function checkMilestones(uint256 _id) internal {
-        Campaign storage campaign = campaigns[_id];
-        
-        for (uint i = 0; i < campaign.milestones.length; i++) {
-            if (!campaign.milestoneReached[i]) {
-                if (campaign.amountCollected >= campaign.milestoneAmounts[i]) {
-                    campaign.milestoneReached[i] = true;  // Mark milestone as reached
-                    releaseFunds(_id, campaign.milestoneAmounts[i]);  // Release funds if milestone reached
-                }
-            }
-        }
-    }
-
-    // Function to release funds to the owner when milestones are reached
-    function releaseFunds(uint256 _id, uint256 _amount) internal {
-        Campaign storage campaign = campaigns[_id];
-        
-        (bool sent, ) = payable(campaign.owner).call{value: _amount}("");
-        require(sent, "Failed to send Ether");
-    }
-
-    // Function to get the list of donators and their donations for a specific campaign
-    function getDonators(uint256 _id) 
-        public 
-        view 
-        returns (address[] memory, uint256[] memory) 
+    // Function to get a campaign by ID
+    function getCampaign(uint256 _campaignId)
+        public
+        view
+        returns (Campaign memory)
     {
-        return (campaigns[_id].donators, campaigns[_id].donations);
+        require(campaignExists[_campaignId], "Campaign does not exist");
+        return campaigns[_campaignId];
     }
 
-    // Function to get all campaigns
-    function getCampaigns() 
-        public 
-        view 
-        returns (Campaign[] memory) 
+    // Function to get donators for a campaign
+    function getDonators(uint256 _campaignId)
+        public
+        view
+        returns (address[] memory)
     {
-        Campaign[] memory allCampaigns = new Campaign[](numberOfCampaigns);
-        for (uint i = 0; i < numberOfCampaigns; i++) {
-            Campaign storage item = campaigns[i];
-            allCampaigns[i] = item;
-        }
-        return allCampaigns;
+        require(campaignExists[_campaignId], "Campaign does not exist");
+        return campaigns[_campaignId].donators;
     }
+
+    // Function to withdraw funds through multi-sig wallet for a campaign
+    function withdrawFunds(
+        uint256 _campaignId,
+        address _to,
+        uint256 _amount
+    ) public {
+        require(campaignExists[_campaignId], "Campaign does not exist");
+        require(profileManager.isProfileOwner( msg.sender), "Only profile owner can withdraw");
+        require(
+            _amount <=
+                campaigns[_campaignId].amountCollected - campaigns[_campaignId].totalWithdrawn,
+            "Insufficient funds"
+        );
+
+        campaigns[_campaignId].totalWithdrawn += _amount; // Track total withdrawn
+
+        // Use the specific campaign's MultiSig wallet for this withdrawal
+        campaigns[_campaignId].multiSigWallet.createTransaction(_to, _amount);
+    }
+
+    // Function for the owner to post fund utilization description
+    function postFundUtilization(
+        uint256 _campaignId,
+        string memory _utilizationDescription
+    ) public {
+        require(campaignExists[_campaignId], "Campaign does not exist");
+        require(profileManager.isProfileOwner(msg.sender), "Only profile owner can post utilization description");
+
+        campaigns[_campaignId].fundUtilization.push(_utilizationDescription); // Set fund utilization description
+    }
+
+    // Function to receive Ether (for example, donations)
+    receive() external payable {}
 }
